@@ -1,4 +1,5 @@
-# app_debt_servicing.py
+# --- additions only; replace your existing file with this full script ---
+
 import math
 from io import BytesIO
 import pandas as pd
@@ -9,7 +10,6 @@ st.set_page_config(page_title="Debt Servicing Calculator", page_icon="📈", lay
 
 # ========= Helpers =========
 def pmt(rate_per_period: float, n_periods: int, present_value: float) -> float:
-    """Standard PMT for amortizing loan (end-of-period)."""
     if n_periods <= 0:
         return 0.0
     if rate_per_period == 0:
@@ -26,41 +26,54 @@ def build_amortization_schedule(
     structure: str,
     periods_per_year: int = 12,
     loan_label: str = "Loan",
+    io_months: int = 0,
+    extra_principal_map: dict | None = None,
 ):
-    """
-    Returns monthly and yearly amortization DataFrames for a single loan.
-    structure: "Amortizing (P+I)" or "Interest-Only"
-    """
     cols = ["Loan","Period","Payment","Interest","Principal","Ending Balance","Year","Month","Quarter","Cum Interest","Cum Principal"]
     if principal <= 0 or term_years <= 0:
         return pd.DataFrame(columns=cols), pd.DataFrame(columns=["Loan","Year","Payments","Interest","Principal","Ending Balance"])
 
     r = (annual_rate / 100.0) / periods_per_year
     n = int(term_years * periods_per_year)
+    extra_principal_map = extra_principal_map or {}
 
     rows = []
     balance = principal
+    amort_payment_after_io = None
 
-    if structure == "Amortizing (P+I)":
-        payment = pmt(r, n, principal)
-        for t in range(1, n + 1):
-            interest = balance * r
+    for t in range(1, n + 1):
+        in_io_phase = (
+            structure == "Interest-Only (Full Term)"
+            or (structure == "IO 12m then Amortizing" and t <= io_months)
+        )
+        interest = balance * r
+
+        if in_io_phase:
+            payment = interest
+            principal_component = 0.0
+        else:
+            if structure == "Amortizing (P+I)":
+                payment = pmt(r, n, principal) if r != 0 else principal / n
+            elif structure == "IO 12m then Amortizing":
+                if amort_payment_after_io is None:
+                    remaining = n - io_months
+                    amort_payment_after_io = pmt(r, remaining, balance) if r != 0 else balance / max(remaining,1)
+                payment = amort_payment_after_io
+            else:
+                payment = pmt(r, n, balance) if r != 0 else (balance / max(n,1))
             principal_component = payment - interest
-            if t == n:  # snap rounding
-                principal_component = balance
-                payment = interest + principal_component
-            balance = max(balance - principal_component, 0.0)
-            rows.append((loan_label, t, payment, interest, principal_component, balance))
-    else:
-        # Interest-only: periodic interest, balloon principal at maturity
-        interest_payment = balance * r
-        for t in range(1, n):
-            payment = interest_payment
-            rows.append((loan_label, t, payment, interest_payment, 0.0, balance))
-        final_interest = balance * r
-        payment = final_interest + balance
-        rows.append((loan_label, n, payment, final_interest, balance, 0.0))
-        balance = 0.0
+
+        extra = float(extra_principal_map.get(t, 0.0))
+        if extra > 0:
+            principal_component += extra
+            payment += extra
+
+        if t == n and principal_component > 0 and principal_component < balance + 1e-6:
+            principal_component = balance
+            payment = interest + principal_component
+
+        balance = max(balance - principal_component, 0.0)
+        rows.append((loan_label, t, payment, interest, principal_component, balance))
 
     df = pd.DataFrame(rows, columns=["Loan","Period","Payment","Interest","Principal","Ending Balance"])
     df["Year"] = ((df["Period"] - 1) // periods_per_year) + 1
@@ -74,41 +87,33 @@ def build_amortization_schedule(
         Interest=("Interest","sum"),
         Principal=("Principal","sum")
     )
-    yearly["Ending Balance"] = df.groupby(["Year"])["Ending Balance"].last().values
+    yearly["Ending Balance"] = df.groupby("Year")["Ending Balance"].last().values
     return df, yearly
 
 def pad_and_sum_monthly(df_a: pd.DataFrame, df_b: pd.DataFrame) -> pd.DataFrame:
-    """Align two monthly schedules by Period and sum numeric columns, keeping Ending Balance as sum of balances."""
     if df_a.empty and df_b.empty:
         return pd.DataFrame()
     frames = []
     for df in [df_a, df_b]:
-        if df.empty:
-            continue
-        # Minimal set for combine
+        if df.empty: continue
         frames.append(df[["Period","Payment","Interest","Principal","Ending Balance","Year","Month","Quarter"]].copy())
-    # Build master index of periods
+
     max_period = 0
     for df in frames:
-        max_period = max(max_period, df["Period"].max())
-    base = pd.DataFrame({"Period": range(1, max_period + 1)})
-    # Sum over aligned periods
-    agg = base.copy()
+        max_period = max(max_period, int(df["Period"].max()))
+    agg = pd.DataFrame({"Period": range(1, max_period + 1)})
     for col in ["Payment","Interest","Principal","Ending Balance"]:
         agg[col] = 0.0
-    # Year/Month/Quarter from the longest DF where available
-    # Fill progressively
+
     for df in frames:
         agg = agg.merge(df[["Period","Payment","Interest","Principal","Ending Balance","Year","Month","Quarter"]],
                         on="Period", how="left", suffixes=("","_x"))
-        # Add numerics
         for col in ["Payment","Interest","Principal","Ending Balance"]:
             agg[col] = agg[col].fillna(0) + agg[f"{col}_x"].fillna(0)
             agg.drop(columns=[f"{col}_x"], inplace=True)
-        # Fill calendar fields if missing
         for cal in ["Year","Month","Quarter"]:
             agg[cal] = agg[cal].fillna(df[cal])
-    # Cum totals
+
     agg["Cum Interest"] = agg["Interest"].cumsum()
     agg["Cum Principal"] = agg["Principal"].cumsum()
     return agg
@@ -125,20 +130,16 @@ def to_quarterly(df_monthly: pd.DataFrame) -> pd.DataFrame:
     q["Label"] = q.apply(lambda r: f"Y{int(r['Year'])} Q{int(r['Quarter'])}", axis=1)
     return q
 
-def to_annual(df_monthly_or_yearly: pd.DataFrame, from_monthly: bool = True) -> pd.DataFrame:
-    if df_monthly_or_yearly.empty: return df_monthly_or_yearly
-    if from_monthly:
-        y = df_monthly_or_yearly.groupby("Year", as_index=False).agg(
-            Payments=("Payment","sum"), Interest=("Interest","sum"), Principal=("Principal","sum")
-        )
-        y["Ending Balance"] = df_monthly_or_yearly.groupby("Year")["Ending Balance"].last().values
-    else:
-        y = df_monthly_or_yearly.copy()
+def to_annual(df_monthly: pd.DataFrame) -> pd.DataFrame:
+    if df_monthly.empty: return df_monthly
+    y = df_monthly.groupby("Year", as_index=False).agg(
+        Payments=("Payment","sum"), Interest=("Interest","sum"), Principal=("Principal","sum")
+    )
+    y["Ending Balance"] = df_monthly.groupby("Year")["Ending Balance"].last().values
     y["Label"] = y["Year"].apply(lambda x: f"Year {int(x)}")
     return y
 
 def build_view_table(view: str, monthly_df: pd.DataFrame):
-    """Return (table_df, label_col_name, interest_col, principal_col). For combined schedule."""
     if monthly_df is None or monthly_df.empty:
         return monthly_df, None, None, None
     if view == "Monthly":
@@ -150,7 +151,7 @@ def build_view_table(view: str, monthly_df: pd.DataFrame):
         q = to_quarterly(monthly_df)
         return q, "Label", "Interest", "Principal"
     else:
-        a = to_annual(monthly_df, from_monthly=True)
+        a = to_annual(monthly_df)
         return a, "Label", "Interest", "Principal"
 
 def make_chart(df: pd.DataFrame, label_col: str, interest_col: str, principal_col: str, title: str):
@@ -194,56 +195,98 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("Bank Loan")
-    bank_structure = st.selectbox("Bank Structure", ["Amortizing (P+I)", "Interest-Only"])
-    bank_rate = st.number_input("Bank Interest Rate (annual %)", min_value=0.0, value=6.0, step=0.25, format="%.2f")
-    bank_term = st.number_input("Bank Term (years)", min_value=1, value=7, step=1)
+    bank_structure = st.selectbox(
+        "Structure",
+        ["Amortizing (P+I)", "Interest-Only (Full Term)", "IO 12m then Amortizing"]
+    )
+    bank_rate = st.number_input("Interest Rate (annual %)", min_value=0.0, value=6.0, step=0.25, format="%.2f")
+    bank_term = st.number_input("Term (years)", min_value=1, value=7, step=1)
 
     st.subheader("Seller Note")
-    seller_structure = st.selectbox("Seller Structure", ["Amortizing (P+I)", "Interest-Only"])
-    seller_rate = st.number_input("Seller Interest Rate (annual %)", min_value=0.0, value=8.0, step=0.25, format="%.2f")
-    seller_term = st.number_input("Seller Term (years)", min_value=1, value=5, step=1)
+    seller_structure = st.selectbox("Structure ", ["Amortizing (P+I)", "Interest-Only (Full Term)"])
+    seller_rate = st.number_input("Interest Rate (annual %)", min_value=0.0, value=8.0, step=0.25, format="%.2f")
+    seller_term = st.number_input("Term (years)", min_value=1, value=5, step=1)
+
+    st.markdown("##### Seller: Tax Burden Alleviator")
+    alleviator_amount = st.number_input("Tax Burden Alleviator (extra principal, A$)", min_value=0.0, value=0.0, step=10_000.0, format="%.2f")
+    alleviator_month = st.number_input(
+        "Month number for Alleviator (1–term months)",
+        min_value=1, max_value=max(1, seller_term * 12), value=min(6, seller_term * 12), step=1
+    )
+
+    st.markdown("---")
+    st.subheader("Bank Capacity (Guide)")
+    unsecured_multiple = st.number_input("Unsecured finance vs EBITDA (× multiple)", min_value=0.0, value=2.2, step=0.1, format="%.2f")
+    ffe_value = st.number_input("FFE / Equipment Value (A$)", min_value=0.0, value=0.0, step=50_000.0, format="%.2f")
+    ffe_advance_rate = st.number_input("Advance rate on FFE (0–1)", min_value=0.0, max_value=1.0, value=0.70, step=0.05, format="%.2f")
+    cap_bank_to_capacity = st.checkbox("Cap bank loan to capacity & reallocate excess to Seller Note", value=True)
 
 # ========= Core Calculations =========
 equity_roll_value = sale_price * equity_roll_pct
 deposit_value = sale_price * deposit_pct
-
-# Amount to finance after equity roll and deposit
 finance_needed = max(sale_price - equity_roll_value - deposit_value, 0.0)
 
-seller_principal = finance_needed * split_seller_pct
-bank_principal = finance_needed - seller_principal
+# Raw split
+bank_principal_raw = finance_needed * (1 - split_seller_pct)
+seller_principal_raw = finance_needed - bank_principal_raw
 
-# Build per-loan monthly schedules
+# --- Bank capacity calculation ---
+unsecured_capacity = ebitda_input * unsecured_multiple
+secured_capacity = ffe_value * ffe_advance_rate
+bank_capacity_total = unsecured_capacity + secured_capacity
+
+# Apply capacity cap (reallocate overflow to seller)
+if cap_bank_to_capacity and bank_principal_raw > bank_capacity_total:
+    bank_principal = bank_capacity_total
+    seller_principal = finance_needed - bank_principal
+else:
+    bank_principal = bank_principal_raw
+    seller_principal = seller_principal_raw
+
+# Seller extra principal map
+seller_extra_map = {}
+if alleviator_amount > 0 and 1 <= alleviator_month <= seller_term * 12:
+    seller_extra_map[alleviator_month] = alleviator_amount
+
+# Bank schedule (IO -> P+I supported)
+bank_io_months = 12 if bank_structure == "IO 12m then Amortizing" else 0
 bank_m_df, bank_y_df = build_amortization_schedule(
-    principal=bank_principal, annual_rate=bank_rate, term_years=bank_term, structure=bank_structure, loan_label="Bank"
-)
-seller_m_df, seller_y_df = build_amortization_schedule(
-    principal=seller_principal, annual_rate=seller_rate, term_years=seller_term, structure=seller_structure, loan_label="Seller"
+    principal=bank_principal, annual_rate=bank_rate, term_years=bank_term,
+    structure=bank_structure, loan_label="Bank", io_months=bank_io_months
 )
 
-# Combine monthly for blended KPIs
+# Seller schedule (with alleviator)
+seller_m_df, seller_y_df = build_amortization_schedule(
+    principal=seller_principal, annual_rate=seller_rate, term_years=seller_term,
+    structure=seller_structure, loan_label="Seller", extra_principal_map=seller_extra_map
+)
+
+# Combined schedule
 combined_m_df = pad_and_sum_monthly(bank_m_df, seller_m_df)
 
-# Compute repayments
-annual_payment_total = combined_m_df.groupby("Year")["Payment"].sum().iloc[0] if not combined_m_df.empty else 0.0
-# More robust: compute average annual equivalent from monthly totals
-if not combined_m_df.empty:
-    annual_payment_total = combined_m_df["Payment"].sum() / (combined_m_df["Year"].max())  # average per year over life
-monthly_equiv_payment = annual_payment_total / 12.0
+# Coverage: Year 1 vs Avg. Year 2+
+def year1_and_avg_later(df_monthly: pd.DataFrame):
+    if df_monthly.empty: return 0.0, 0.0
+    annual = to_annual(df_monthly)
+    y1 = float(annual.loc[annual["Year"]==1, "Payments"].sum()) if (annual["Year"]==1).any() else 0.0
+    later = annual.loc[annual["Year"]>=2, "Payments"]
+    avg_later = float(later.mean()) if not later.empty else 0.0
+    return y1, avg_later
 
-# EBITDA adjust (operator salary before servicing)
+repay_year1, repay_avg_later = year1_and_avg_later(combined_m_df)
+
+# EBITDA adjust
 ebitda_adjusted = max(ebitda_input - (operator_salary if use_operator_salary else 0.0), 0.0)
 
-# Profit after debt service using annual_equivalent
-profit_after_debt_annual = ebitda_adjusted - annual_payment_total
-profit_after_debt_monthly = profit_after_debt_annual / 12.0
+profit_after_debt_yr1 = ebitda_adjusted - repay_year1
+profit_after_debt_later = ebitda_adjusted - repay_avg_later
 
-# Buffer / Margin of Safety
-buffer_ratio = (annual_payment_total / ebitda_adjusted) if ebitda_adjusted > 0 else float("inf")
+buffer_ratio_yr1 = (repay_year1 / ebitda_adjusted) if ebitda_adjusted > 0 else float("inf")
+buffer_ratio_later = (repay_avg_later / ebitda_adjusted) if ebitda_adjusted > 0 else float("inf")
 
 # ========= Header / KPIs =========
-st.title("📈 Debt Servicing Calculator — Bank + Seller Note")
-st.caption("Equity roll and deposit reduce financing; split remainder between bank and seller note. EBITDA can optionally be reduced by an operator salary before coverage calculations.")
+st.title("📈 Debt Servicing Calculator — Bank + Seller Note (Capacity-aware)")
+st.caption("Includes bank capacity from unsecured EBITDA multiple and FFE advance; optional cap that reallocates overflow to the Seller Note.")
 
 top_cols = st.columns([1,1,1,1,1,1])
 with top_cols[0]:
@@ -259,6 +302,20 @@ with top_cols[4]:
 with top_cols[5]:
     st.metric("Seller Principal", fmt_money(seller_principal))
 
+# Bank capacity card
+st.markdown("### Bank Capacity Guide")
+cap1, cap2, cap3, cap4 = st.columns(4)
+with cap1:
+    st.metric("Unsecured Capacity", fmt_money(unsecured_capacity), help="EBITDA × unsecured multiple")
+with cap2:
+    st.metric("FFE Capacity", fmt_money(secured_capacity), help="FFE Value × advance rate")
+with cap3:
+    st.metric("Total Bank Capacity", fmt_money(bank_capacity_total))
+with cap4:
+    gap = bank_principal_raw - bank_capacity_total
+    gap_display = fmt_money(gap) if gap > 0 else "None"
+    st.metric("Bank Over Capacity?", gap_display)
+
 st.markdown("---")
 
 center_cols = st.columns([1,2,1])
@@ -267,7 +324,7 @@ with center_cols[1]:
         """
         <div style="text-align:center;">
             <h2 style="margin-bottom:0.5rem;">Key Servicing Numbers (Blended)</h2>
-            <p style="color:#6b7280;margin-top:0;">Repayments, profit left, and safety buffer across both loans</p>
+            <p style="color:#6b7280;margin-top:0;">Year-1 vs later years if IO year is used</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -276,17 +333,19 @@ with center_cols[1]:
     with kpi:
         k1, k2, k3 = st.columns(3)
         with k1:
-            st.metric("Annual Repayments (equiv.)", fmt_money(annual_payment_total))
-            st.metric("Monthly Repayments (equiv.)", fmt_money(monthly_equiv_payment))
+            st.metric("Year 1 Repayments", fmt_money(repay_year1))
+            st.metric("Monthly (Year 1)", fmt_money(repay_year1/12 if repay_year1 else 0.0))
         with k2:
-            st.metric("Profit Left (Annual)", fmt_money(profit_after_debt_annual))
-            st.metric("Profit Left (Monthly)", fmt_money(profit_after_debt_monthly))
+            st.metric("Avg. Year 2+ Repayments", fmt_money(repay_avg_later))
+            st.metric("Monthly (Y2+ avg.)", fmt_money(repay_avg_later/12 if repay_avg_later else 0.0))
         with k3:
-            buffer_display = "∞" if buffer_ratio == float("inf") else fmt_pct(buffer_ratio)
-            st.metric("Debt as % of EBITDA", buffer_display)
-            st.caption("Lower is safer. Consider WC, capex, tax, contingencies.")
+            b1 = "∞" if buffer_ratio_yr1 == float("inf") else fmt_pct(buffer_ratio_yr1)
+            b2 = "∞" if buffer_ratio_later == float("inf") else fmt_pct(buffer_ratio_later)
+            st.metric("Debt as % EBITDA (Y1)", b1)
+            st.metric("Debt as % EBITDA (Y2+)", b2)
+            st.caption("Lower is safer. Don’t forget WC, capex, tax, contingencies.")
 
-# ========= Per-Loan Snapshots =========
+# ========= Loan Snapshots =========
 st.markdown("### Loan Snapshots")
 snap1, snap2 = st.columns(2)
 with snap1:
@@ -295,27 +354,30 @@ with snap1:
         st.subheader("Bank Loan")
         st.write(f"Structure: **{bank_structure}** · Rate: **{bank_rate:.2f}%** · Term: **{bank_term} yrs**")
         st.write(f"Principal: **{fmt_money(bank_principal)}**")
+        if bank_structure == "IO 12m then Amortizing":
+            st.caption("First 12 months interest-only, then fixed P+I.")
         if not bank_m_df.empty:
-            st.write(f"First-Year Payments: **{fmt_money(bank_m_df[bank_m_df['Year']==1]['Payment'].sum())}**")
+            st.write(f"Year 1 Payments: **{fmt_money(to_annual(bank_m_df).loc[lambda d: d['Year']==1,'Payments'].sum())}**")
 with snap2:
     card = st.container(border=True)
     with card:
         st.subheader("Seller Note")
         st.write(f"Structure: **{seller_structure}** · Rate: **{seller_rate:.2f}%** · Term: **{seller_term} yrs**")
         st.write(f"Principal: **{fmt_money(seller_principal)}**")
+        if alleviator_amount > 0:
+            st.write(f"Alleviator: **{fmt_money(alleviator_amount)}** in **Month {alleviator_month}**")
         if not seller_m_df.empty:
-            st.write(f"First-Year Payments: **{fmt_money(seller_m_df[seller_m_df['Year']==1]['Payment'].sum())}**")
+            st.write(f"Year 1 Payments: **{fmt_money(to_annual(seller_m_df).loc[lambda d: d['Year']==1,'Payments'].sum())}**")
 
-# ========= View Toggle + Table (Combined) =========
+# ========= Amortization View (Combined) =========
 st.markdown("### Amortization View (Combined)")
 view = st.radio("Choose view", ["Monthly", "Quarterly", "Annual"], horizontal=True)
 
+combined_table_df, label_col, interest_col, principal_col = (None, None, None, None)
 if combined_m_df is None or combined_m_df.empty:
     st.info("Enter valid loan values to generate a combined amortization schedule.")
-    table_df, label_col, interest_col, principal_col = None, None, None, None
 else:
-    table_df, label_col, interest_col, principal_col = build_view_table(view, combined_m_df)
-    # Show table
+    combined_table_df, label_col, interest_col, principal_col = build_view_table(view, combined_m_df)
     if view == "Monthly":
         show_cols = ["Period","Year","Month","Label","Payment","Interest","Principal","Ending Balance","Cum Interest","Cum Principal"]
     elif view == "Quarterly":
@@ -324,23 +386,18 @@ else:
         show_cols = ["Year","Label","Payments","Interest","Principal","Ending Balance"]
 
     st.dataframe(
-        table_df[show_cols].style.format({
-            "Payment":"{:,.2f}",
-            "Payments":"{:,.2f}",
-            "Interest":"{:,.2f}",
-            "Principal":"{:,.2f}",
-            "Ending Balance":"{:,.2f}",
-            "Cum Interest":"{:,.2f}",
-            "Cum Principal":"{:,.2f}",
+        combined_table_df[show_cols].style.format({
+            "Payment":"{:,.2f}", "Payments":"{:,.2f}",
+            "Interest":"{:,.2f}", "Principal":"{:,.2f}",
+            "Ending Balance":"{:,.2f}", "Cum Interest":"{:,.2f}", "Cum Principal":"{:,.2f}",
         }),
-        use_container_width=True,
-        height=380
+        use_container_width=True, height=380
     )
 
 # ========= Chart =========
 st.markdown("### Principal vs Interest Over Time (Combined)")
 fig = make_chart(
-    df=table_df, label_col=label_col, interest_col=interest_col, principal_col=principal_col,
+    df=combined_table_df, label_col=label_col, interest_col=interest_col, principal_col=principal_col,
     title=f"{view} Principal vs Interest"
 )
 if fig is None:
@@ -354,46 +411,47 @@ else:
 
 # ========= Export =========
 st.markdown("### Export")
-
-# Summary row
 summary = {
     "Sale Price": sale_price,
     "Equity Roll %": equity_roll_pct, "Equity Roll Value": equity_roll_value,
     "Deposit %": deposit_pct, "Deposit Value": deposit_value,
     "Financed Amount": finance_needed,
-    "Bank Principal": bank_principal,
-    "Seller Principal": seller_principal,
+    "Bank Principal (final)": bank_principal,
+    "Seller Principal (final)": seller_principal,
+    "Bank Principal (raw split)": bank_principal_raw,
+    "Bank Capacity - Unsecured": unsecured_capacity,
+    "Bank Capacity - FFE": secured_capacity,
+    "Bank Capacity - Total": bank_capacity_total,
+    "Cap to Capacity Applied?": cap_bank_to_capacity,
     "Bank Rate %": bank_rate, "Bank Term (yrs)": bank_term, "Bank Structure": bank_structure,
     "Seller Rate %": seller_rate, "Seller Term (yrs)": seller_term, "Seller Structure": seller_structure,
+    "Seller Alleviator Amount": alleviator_amount,
+    "Seller Alleviator Month": alleviator_month if alleviator_amount > 0 else None,
     "EBITDA (input)": ebitda_input,
     "Operator Salary Deducted?": use_operator_salary,
     "Operator Salary (annual)": operator_salary if use_operator_salary else 0.0,
     "EBITDA Used for Servicing": ebitda_adjusted,
-    "Annual Repayments (equiv.)": annual_payment_total,
-    "Monthly Repayments (equiv.)": monthly_equiv_payment,
-    "Profit Left (Annual)": profit_after_debt_annual,
-    "Profit Left (Monthly)": profit_after_debt_monthly,
-    "Debt as % of EBITDA": (annual_payment_total / ebitda_adjusted) if ebitda_adjusted > 0 else None,
+    "Year 1 Repayments (blended)": repay_year1,
+    "Avg. Year 2+ Repayments (blended)": repay_avg_later,
+    "Debt as % EBITDA (Y1)": buffer_ratio_yr1 if ebitda_adjusted > 0 else None,
+    "Debt as % EBITDA (Y2+)": buffer_ratio_later if ebitda_adjusted > 0 else None,
 }
 summary_df = pd.DataFrame([summary])
 
-# Build alternate views for export
 quarterly_df = to_quarterly(combined_m_df) if not combined_m_df.empty else pd.DataFrame()
-annual_df = to_annual(combined_m_df, from_monthly=True) if not combined_m_df.empty else pd.DataFrame()
+annual_df = to_annual(combined_m_df) if not combined_m_df.empty else pd.DataFrame()
 
 excel_buffer = BytesIO()
 with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
-    summary_df.to_excel(writer, index=False, sheet_name="Summary (Blended)")
-    # Per-loan sheets
+    summary_df.to_excel(writer, index=False, sheet_name="Summary (Blended+Capacity)")
     if not bank_m_df.empty:
         bank_m_df.to_excel(writer, index=False, sheet_name="Bank (Monthly)")
         to_quarterly(bank_m_df).to_excel(writer, index=False, sheet_name="Bank (Quarterly)")
-        to_annual(bank_m_df, from_monthly=True).to_excel(writer, index=False, sheet_name="Bank (Annual)")
+        to_annual(bank_m_df).to_excel(writer, index=False, sheet_name="Bank (Annual)")
     if not seller_m_df.empty:
         seller_m_df.to_excel(writer, index=False, sheet_name="Seller (Monthly)")
         to_quarterly(seller_m_df).to_excel(writer, index=False, sheet_name="Seller (Quarterly)")
-        to_annual(seller_m_df, from_monthly=True).to_excel(writer, index=False, sheet_name="Seller (Annual)")
-    # Combined sheets
+        to_annual(seller_m_df).to_excel(writer, index=False, sheet_name="Seller (Annual)")
     if not combined_m_df.empty:
         combined_m_df.to_excel(writer, index=False, sheet_name="Combined (Monthly)")
         if not quarterly_df.empty:
@@ -403,30 +461,24 @@ with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
 excel_buffer.seek(0)
 
 st.download_button(
-    "⬇️ Download Excel (Stack: Bank + Seller)",
+    "⬇️ Download Excel (Stack + Capacity)",
     data=excel_buffer,
-    file_name="debt_servicing_stack.xlsx",
+    file_name="debt_servicing_stack_capacity.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
-
-# CSV quick export of current view
-if table_df is not None and not table_df.empty:
-    st.download_button(
-        f"Download {view} View CSV (Combined)",
-        data=table_df.to_csv(index=False),
-        file_name=f"amortization_combined_{view.lower()}.csv",
-        mime="text/csv",
-    )
 
 # ========= Risk Hints =========
 st.markdown("---")
 warn = []
+worst_repay = max(repay_year1, repay_avg_later)
 if ebitda_adjusted == 0:
     warn.append("Adjusted EBITDA is zero; debt service is not covered.")
-elif annual_payment_total > ebitda_adjusted:
-    warn.append("Annual repayments exceed adjusted EBITDA (negative coverage).")
-elif annual_payment_total > 0.7 * ebitda_adjusted:
-    warn.append("Debt service consumes more than ~70% of adjusted EBITDA (thin buffer).")
+elif worst_repay > ebitda_adjusted:
+    warn.append("Repayments exceed adjusted EBITDA in at least one phase (negative coverage).")
+elif worst_repay > 0.7 * ebitda_adjusted:
+    warn.append("Debt service consumes >~70% of adjusted EBITDA in at least one phase (thin buffer).")
+if cap_bank_to_capacity and bank_principal_raw > bank_capacity_total:
+    warn.append("Bank principal capped by capacity; excess reallocated to Seller Note.")
 if warn:
     st.warning(" • ".join(warn))
 else:
