@@ -259,6 +259,12 @@ ebitda_adjusted = max(ebitda_input - (op_salary if use_op else 0.0), 0.0)
 buffer_y1 = (y1 / ebitda_adjusted) if ebitda_adjusted > 0 else float("inf")
 buffer_y2 = (y2plus / ebitda_adjusted) if ebitda_adjusted > 0 else float("inf")
 
+# === NEW: Profit left after debt (annual & monthly) ===
+profit_left_y1_annual = ebitda_adjusted - y1
+profit_left_y1_monthly = profit_left_y1_annual / 12.0
+profit_left_y2_annual = ebitda_adjusted - y2plus
+profit_left_y2_monthly = profit_left_y2_annual / 12.0
+
 # ========= Dashboard =========
 st.title("📊 Debt Servicing Calculator — Bank + Seller Note")
 
@@ -274,6 +280,14 @@ cov = st.columns(3)
 cov[0].metric("Year 1 Repayments", fmt_money(y1))
 cov[1].metric("Avg. Years 2+ Repayments", fmt_money(y2plus))
 cov[2].metric("Debt as % of EBITDA", f"{buffer_y1*100:.1f}% (Y1) / {buffer_y2*100:.1f}% (Y2+)")
+
+# === NEW: Profit Left After Debt ===
+st.markdown("### Profit Left After Debt (EBITDA − Repayments)")
+pl = st.columns(4)
+pl[0].metric("Profit Left (Y1 Annual)", fmt_money(profit_left_y1_annual))
+pl[1].metric("Profit Left (Y1 Monthly)", fmt_money(profit_left_y1_monthly))
+pl[2].metric("Profit Left (Y2+ Annual)", fmt_money(profit_left_y2_annual))
+pl[3].metric("Profit Left (Y2+ Monthly)", fmt_money(profit_left_y2_monthly))
 
 st.markdown("### Monthly Repayments by Loan")
 m1 = st.columns(3)
@@ -325,6 +339,10 @@ def build_print_html(summary_dict):
             <th>Avg. Y2+ Total</th><td>{m(summary_dict['Avg. Y2+ Repayments (Total)'])}</td></tr>
         <tr><th>Debt as % EBITDA (Y1)</th><td>{p(summary_dict['Debt as % EBITDA (Y1)'])}</td>
             <th>Debt as % EBITDA (Y2+)</th><td>{p(summary_dict['Debt as % EBITDA (Y2+)'])}</td></tr>
+        <tr><th>Profit Left (Y1 Annual)</th><td>{m(summary_dict['Profit Left (Y1 Annual)'])}</td>
+            <th>Profit Left (Y2+ Annual)</th><td>{m(summary_dict['Profit Left (Y2+ Annual)'])}</td></tr>
+        <tr><th>Profit Left (Y1 Monthly)</th><td>{m(summary_dict['Profit Left (Y1 Monthly)'])}</td>
+            <th>Profit Left (Y2+ Monthly)</th><td>{m(summary_dict['Profit Left (Y2+ Monthly)'])}</td></tr>
       </table>
 
       <h3>Definitions</h3>
@@ -350,6 +368,11 @@ summary = {
     "Avg. Y2+ Repayments (Total)": y2plus,
     "Debt as % EBITDA (Y1)": buffer_y1,
     "Debt as % EBITDA (Y2+)": buffer_y2,
+    # Include the new profit-left metrics in print view:
+    "Profit Left (Y1 Annual)": profit_left_y1_annual,
+    "Profit Left (Y1 Monthly)": profit_left_y1_monthly,
+    "Profit Left (Y2+ Annual)": profit_left_y2_annual,
+    "Profit Left (Y2+ Monthly)": profit_left_y2_monthly,
 }
 
 # HTML print view (opens new tab)
@@ -368,6 +391,10 @@ if REPORTLAB_AVAILABLE:
         Paragraph(f"EBITDA: {fmt_money(ebitda_input)}<br/>EBITDA Used: {fmt_money(ebitda_adjusted)}", styles["Normal"]),
         Paragraph(f"Year 1 Repayments: {fmt_money(y1)}<br/>Avg. Y2+ Repayments: {fmt_money(y2plus)}", styles["Normal"]),
         Paragraph(f"Debt as % EBITDA: {buffer_y1*100:.1f}% (Y1) / {buffer_y2*100:.1f}% (Y2+)", styles["Normal"]),
+        Paragraph(f"Profit Left (Y1 Annual): {fmt_money(profit_left_y1_annual)}<br/>"
+                  f"Profit Left (Y1 Monthly): {fmt_money(profit_left_y1_monthly)}", styles["Normal"]),
+        Paragraph(f"Profit Left (Y2+ Annual): {fmt_money(profit_left_y2_annual)}<br/>"
+                  f"Profit Left (Y2+ Monthly): {fmt_money(profit_left_y2_monthly)}", styles["Normal"]),
     ])
     buf.seek(0)
     st.download_button("📄 Download PDF", data=buf.getvalue(), file_name="debt_servicing.pdf", mime="application/pdf")
@@ -413,6 +440,7 @@ st.markdown("### Outputs")
 st.markdown(
     """
 - **Key Servicing Numbers (Blended)**: Year-1 vs Avg. Years 2+ totals and monthly equivalents, plus **Debt as % of EBITDA**.
+- **Profit Left After Debt**: EBITDA minus repayments shown **per year** and **per month** (Y1 and Y2+).
 - **Monthly by Loan**: Bank and Seller monthly figures shown **separately** (Year-1 and Avg. Y2+), plus totals.
 - **Loan Snapshots**: Principals, structures, rates, terms.
 - **Print / Export**: HTML Print View and (optionally) PDF download.
