@@ -245,6 +245,7 @@ def make_chart(df: pd.DataFrame, label_col: str, interest_col: str, principal_co
 with st.sidebar:
     st.header("Deal Inputs")
 
+    # Money inputs with commas (EBITDA included)
     sale_price = money_input("Sale Price", 5_000_000.0, key="sale_price")
     ebitda_input = money_input("EBITDA (annual, before any operator salary)", 1_500_000.0, key="ebitda")
 
@@ -428,7 +429,7 @@ with center_cols[1]:
             st.metric("Debt as % EBITDA (Y2+)", b2)
             st.caption("Lower is safer. Consider WC, capex, tax, contingencies.")
 
-# ========= NEW: Monthly costs by loan (separate + total) =========
+# ========= Monthly costs by loan (separate + total) =========
 st.markdown("### Monthly Repayments by Loan")
 byloan1, byloan2 = st.columns(2)
 
@@ -451,6 +452,13 @@ with byloan2:
         if seller_later > 0:
             st.metric("Seller (Y2+ Monthly)", fmt_money(seller_later / 12))
         st.metric("Total (Y2+ Monthly)", fmt_money(repay_avg_later_total / 12 if repay_avg_later_total else 0.0))
+
+# Explanatory note under per-loan monthly section
+st.caption(
+    "🛈 Notes: Year-1 may be lower if the bank loan uses an interest-only (IO) first year; "
+    "Year-1 may be higher if the Seller 'Tax Burden Alleviator' lump-sum occurs in Year-1. "
+    "Avg. Years 2+ reflects steady-state after IO and may change again as one loan matures earlier than the other."
+)
 
 # ========= Loan Snapshots =========
 st.markdown("### Loan Snapshots")
@@ -602,3 +610,32 @@ if warn:
     st.warning(" • ".join(warn))
 else:
     st.info("Coverage looks reasonable based on inputs. Layer in working capital, capex, taxes, and contingencies.")
+
+# ========= How to Use — SOP =========
+st.markdown("---")
+st.markdown("## How to Use — SOP")
+st.markdown("### Inputs")
+st.markdown(
+    """
+- **Sale Price / EBITDA / FFE value**: Type whole dollars with commas (e.g., `5,000,000`).
+- **Equity Roll / Deposit / FFE advance**: Type as `%` or decimal (e.g., `10%` or `0.10`).
+- **Debt Stack Split**: Choose what % of the financed amount is a **Seller Note** (bank gets the rest).
+- **Bank Structure**:
+  - *Amortizing (P+I)*: fixed payments across the term.
+  - *Interest-Only (Full Term)*: interest only until maturity, balloon at end.
+  - *IO 12m then Amortizing*: first 12 months interest-only, then fixed P+I.
+- **Seller Alleviator**: Optional one-off extra principal in a specified month (default Month 6).
+- **Bank Capacity**: Unsecured capacity = EBITDA × multiple; secured = FFE × advance rate. Optionally cap the bank loan to this capacity (overflow goes to the Seller Note).
+- **Operator Salary**: Optional; deducted from EBITDA *before* debt coverage is assessed.
+    """
+)
+st.markdown("### Outputs")
+st.markdown(
+    """
+- **Key Servicing Numbers (Blended)**: Year-1 vs Avg. Years 2+ totals and monthly equivalents. Coverage shown as **Debt as % of EBITDA**.
+- **Monthly by Loan**: Shows **Bank** and **Seller** monthly figures separately (Year-1 and Avg. Y2+), plus totals.
+- **Loan Snapshots**: Per-loan principal, structure, rate, term, and Year-1 total.
+- **Amortization View**: Switch between **Monthly**, **Quarterly**, or **Annual** summaries; download the chart and Excel workbook.
+- **Risk Hints**: Flags thin or negative coverage, or bank capacity capping.
+    """
+)
