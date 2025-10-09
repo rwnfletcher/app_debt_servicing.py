@@ -1,12 +1,13 @@
 # app_debt_servicing.py
-import math, base64
+import math
+import base64
 from io import BytesIO
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-# PDF generation
+# --- Optional ReportLab import ---
 try:
     from reportlab.lib.pagesizes import A4
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -17,9 +18,9 @@ try:
 except Exception:
     REPORTLAB_AVAILABLE = False
 
-st.set_page_config(page_title="Debt Servicing Calculator", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Debt Servicing Calculator — Bank + Seller Note (Capacity-aware)", page_icon="📈", layout="wide")
 
-# ========= Theme + Reset Defaults =========
+# ========= Default Config =========
 DEFAULTS = {
     "sale_price": 5_000_000.0,
     "ebitda": 1_500_000.0,
@@ -43,17 +44,14 @@ DEFAULTS = {
     "theme": "Light",
 }
 
-def _money_fmt_str(x: float) -> str:
-    return f"{x:,.2f}"
-
 def reset_defaults():
     st.session_state.clear()
 
-# Theme + reset
-top = st.columns([1,1,6])
-with top[0]:
+# ========= Theme + Reset =========
+top_controls = st.columns([1, 1, 6])
+with top_controls[0]:
     theme_choice = st.radio("Theme", ["Light", "Dark"], key="theme_choice", horizontal=True)
-with top[1]:
+with top_controls[1]:
     if st.button("Reset to defaults"):
         reset_defaults()
         st.rerun()
@@ -66,29 +64,39 @@ if theme_choice == "Dark":
     </style>
     """, unsafe_allow_html=True)
 
-# ========= Helpers =========
+# ========= Format Helpers =========
 def fmt_money(x): return f"${float(x or 0):,.0f}"
 def fmt_money2(x): return f"${float(x or 0):,.2f}"
 def fmt_pct(x): return f"{float(x):.1%}" if x not in (None, float('inf')) else "—"
 
-def _parse_money_str(s, d=0.0):
-    try: return float(str(s).replace(",","").strip() or d)
-    except: return d
-def _parse_percent_str(s, d=0.0):
-    s=str(s).replace(",","").strip()
-    if s.endswith("%"): s=s[:-1]
-    try:
-        v=float(s); return v/100 if v>1 else v
-    except: return d
-def money_input(lbl, val, key): return _parse_money_str(st.text_input(lbl,f"{val:,.2f}",key=key),val)
-def percent_input(lbl,val,key): return _parse_percent_str(st.text_input(lbl,f"{val*100:.1f}%",key=key),val)
+# ========= Input Helpers =========
+def _parse_money(s, default=0.0):
+    try: return float(str(s).replace(",","").strip() or default)
+    except: return default
 
+def _parse_pct(s, default=0.0):
+    s = str(s).replace(",","").strip()
+    if s.endswith("%"): s = s[:-1]
+    try:
+        v = float(s)
+        return v/100 if v>1 else v
+    except:
+        return default
+
+def money_input(label, default, key):
+    val_str = st.text_input(label, value=f"{default:,.2f}", key=key)
+    return _parse_money(val_str, default)
+
+def percent_input(label, default, key):
+    val_str = st.text_input(label, value=f"{default*100:.1f}%", key=key)
+    return _parse_pct(val_str, default)
+
+# ========= Financial Logic =========
 def pmt(r,n,pv):
     if n<=0: return 0
     if r==0: return pv/n
     return (r*pv)/(1-(1+r)**(-n))
 
-# amortization builder
 def build_amort(principal, rate, years, struct, label, io_months=0, extra=None):
     extra=extra or {}
     r=rate/100/12; n=int(years*12)
@@ -216,7 +224,7 @@ cols2b[1].metric("Seller (Y2+ Monthly)",fmt_money(sell_y2/12))
 cols2b[2].metric("Total (Y2+ Monthly)",fmt_money(later/12))
 st.caption("🛈 Year-1 may differ due to IO period or Seller Alleviator payment.")
 
-# ========= Print + PDF =========
+# ========= Print / Export =========
 def build_print_html(summary):
     now=datetime.now().strftime("%Y-%m-%d %H:%M")
     def m(v):return fmt_money(v)
@@ -228,11 +236,10 @@ def build_print_html(summary):
     table{{width:100%;border-collapse:collapse;margin:8px 0}}
     th,td{{border:1px solid #ccc;padding:6px 8px;font-size:12px}}
     th{{background:#f6f6f6}}
-    .btn{{display:inline-block;padding:8px 12px;border:1px solid #ccc;border-radius:5px;text-decoration:none;color:#111}}
     </style></head><body>
     <h2>Debt Servicing Calculator — Summary</h2>
     <p>Generated {now}</p>
-    <a class='btn' onclick='window.print()'>Print / Save as PDF</a>
+    <a style='border:1px solid #ccc;padding:6px 10px;border-radius:5px;' onclick='window.print()'>Print / Save as PDF</a>
     <h3>Snapshot</h3>
     <table><tr><th>Sale Price</th><td>{m(summary['Sale Price'])}</td><th>Financed</th><td>{m(summary['Financed Amount'])}</td></tr>
     <tr><th>Bank Principal</th><td>{m(summary['Bank Principal (final)'])}</td><th>Seller Principal</th><td>{m(summary['Seller Principal (final)'])}</td></tr>
