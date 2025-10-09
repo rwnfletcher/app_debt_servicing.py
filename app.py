@@ -5,7 +5,6 @@ from datetime import datetime
 
 import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt
 
 # ---- Optional ReportLab import (PDF) ----
 try:
@@ -71,7 +70,6 @@ if theme_choice == "Dark":
 
 # ========= Format helpers =========
 def fmt_money(x): return f"${float(x or 0):,.0f}"
-def fmt_money2(x): return f"${float(x or 0):,.2f}"
 def fmt_pct(x):
     try:
         return f"{float(x):.1%}"
@@ -186,7 +184,6 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("Debt Stack Split")
-    # Integer-safe slider (0..100 -> divide by 100)
     split_seller_pct = st.slider(
         "Seller Note (% of financed stack)",
         0, 100, int(DEFAULTS["split_seller_pct"] * 100), 1, key="split_seller_slider"
@@ -234,7 +231,7 @@ else:
     bank_principal = bank_raw
     seller_principal = seller_raw
 
-# Seller extra principal map
+# Seller extra principal map (kept in schedule to reduce interest later months)
 extra_map = {int(allev_month): float(allev_amt)} if allev_amt > 0 else {}
 
 # Build schedules
@@ -247,23 +244,47 @@ seller_df = build_amort(
     "Seller", io_months=0, extra=extra_map
 )
 
-combined_df = pd.concat([bank_df, seller_df], ignore_index=True).sort_values("Period")
-ann = to_annual(combined_df)
-y1 = float(ann.loc[ann["Year"] == 1, "Payments"].sum()) if not ann.empty else 0.0
-y2plus = float(ann.loc[ann["Year"] >= 2, "Payments"].mean()) if not ann.empty else 0.0
+# Annual totals (including Alleviator inside seller_df's Year 1)
+ann = to_annual(pd.concat([bank_df, seller_df], ignore_index=True))
+y1_incl = float(ann.loc[ann["Year"] == 1, "Payments"].sum()) if not ann.empty else 0.0
+y2plus_incl = float(ann.loc[ann["Year"] >= 2, "Payments"].mean()) if not ann.empty else 0.0
 
-bank_y1, bank_y2plus = perloan_years(bank_df)
-seller_y1, seller_y2plus = perloan_years(seller_df)
+# Per-loan annual totals
+bank_y1_incl, bank_y2plus_incl = perloan_years(bank_df)
+seller_y1_incl, seller_y2plus_incl = perloan_years(seller_df)
 
+# --- NEW: treat Alleviator as separate (no interest cost added to "servicing") ---
+allev_in_y1 = float(allev_amt) if (allev_amt > 0 and allev_month <= 12) else 0.0
+
+# Year 1 servicing excludes alleviator; Y2+ never includes it
+seller_y1_servicing = max(seller_y1_incl - allev_in_y1, 0.0)
+y1_servicing = max(y1_incl - allev_in_y1, 0.0)
+
+# Monthly equivalents for display (servicing-only)
+bank_y1_month = bank_y1_incl / 12.0
+seller_y1_month = seller_y1_servicing / 12.0
+total_y1_month = y1_servicing / 12.0
+
+bank_y2plus_month = bank_y2plus_incl / 12.0
+seller_y2plus_month = seller_y2plus_incl / 12.0
+total_y2plus_month = y2plus_incl / 12.0
+
+# EBITDA adjusted (before debt service)
 ebitda_adjusted = max(ebitda_input - (op_salary if use_op else 0.0), 0.0)
-buffer_y1 = (y1 / ebitda_adjusted) if ebitda_adjusted > 0 else float("inf")
-buffer_y2 = (y2plus / ebitda_adjusted) if ebitda_adjusted > 0 else float("inf")
 
-# === NEW: Profit left after debt (annual & monthly) ===
-profit_left_y1_annual = ebitda_adjusted - y1
+# Buffers use servicing-only (exclude alleviator)
+buffer_y1 = (y1_servicing / ebitda_adjusted) if ebitda_adjusted > 0 else float("inf")
+buffer_y2 = (y2plus_incl / ebitda_adjusted) if ebitda_adjusted > 0 else float("inf")
+
+# Profit left after debt service (exclude alleviator) — annual & monthly
+profit_left_y1_annual = ebitda_adjusted - y1_servicing
 profit_left_y1_monthly = profit_left_y1_annual / 12.0
-profit_left_y2_annual = ebitda_adjusted - y2plus
+profit_left_y2_annual = ebitda_adjusted - y2plus_incl
 profit_left_y2_monthly = profit_left_y2_annual / 12.0
+
+# --- NEW: Year 1 Capital Required section ---
+# Capital required in Y1 = Alleviator (if in Y1) + Bank Y1 repayments + Seller Y1 repayments (servicing-only)
+year1_capital_required = allev_in_y1 + bank_y1_incl + seller_y1_servicing
 
 # ========= Dashboard =========
 st.title("📊 Debt Servicing Calculator — Bank + Seller Note")
@@ -275,34 +296,39 @@ top[2].metric("Bank Principal", fmt_money(bank_principal))
 top[3].metric("Seller Principal", fmt_money(seller_principal))
 top[4].metric("EBITDA Used", fmt_money(ebitda_adjusted))
 
-st.markdown("### Coverage Summary")
+st.markdown("### Coverage Summary (Servicing Only)")
 cov = st.columns(3)
-cov[0].metric("Year 1 Repayments", fmt_money(y1))
-cov[1].metric("Avg. Years 2+ Repayments", fmt_money(y2plus))
+cov[0].metric("Year 1 Repayments", fmt_money(y1_servicing))
+cov[1].metric("Avg. Years 2+ Repayments", fmt_money(y2plus_incl))
 cov[2].metric("Debt as % of EBITDA", f"{buffer_y1*100:.1f}% (Y1) / {buffer_y2*100:.1f}% (Y2+)")
 
-# === NEW: Profit Left After Debt ===
-st.markdown("### Profit Left After Debt (EBITDA − Repayments)")
+st.markdown("### Profit Left After Debt (EBITDA − Servicing)")
 pl = st.columns(4)
 pl[0].metric("Profit Left (Y1 Annual)", fmt_money(profit_left_y1_annual))
 pl[1].metric("Profit Left (Y1 Monthly)", fmt_money(profit_left_y1_monthly))
 pl[2].metric("Profit Left (Y2+ Annual)", fmt_money(profit_left_y2_annual))
 pl[3].metric("Profit Left (Y2+ Monthly)", fmt_money(profit_left_y2_monthly))
 
-st.markdown("### Monthly Repayments by Loan")
+st.markdown("### Monthly Repayments by Loan (Servicing Only)")
 m1 = st.columns(3)
-m1[0].metric("Bank (Y1 Monthly)", fmt_money(bank_y1 / 12))
-m1[1].metric("Seller (Y1 Monthly)", fmt_money(seller_y1 / 12))
-m1[2].metric("Total (Y1 Monthly)", fmt_money(y1 / 12))
+m1[0].metric("Bank (Y1 Monthly)", fmt_money(bank_y1_month))
+m1[1].metric("Seller (Y1 Monthly)", fmt_money(seller_y1_month))
+m1[2].metric("Total (Y1 Monthly)", fmt_money(total_y1_month))
 
 m2 = st.columns(3)
-m2[0].metric("Bank (Y2+ Monthly)", fmt_money(bank_y2plus / 12))
-m2[1].metric("Seller (Y2+ Monthly)", fmt_money(seller_y2plus / 12))
-m2[2].metric("Total (Y2+ Monthly)", fmt_money(y2plus / 12))
+m2[0].metric("Bank (Y2+ Monthly)", fmt_money(bank_y2plus_month))
+m2[1].metric("Seller (Y2+ Monthly)", fmt_money(seller_y2plus_month))
+m2[2].metric("Total (Y2+ Monthly)", fmt_money(total_y2plus_month))
 
-st.caption("🛈 Year-1 may be lower if the bank loan uses an IO (interest-only) first year; "
-           "Year-1 may be higher if a Seller ‘Tax Burden Alleviator’ lump-sum occurs in Year-1. "
-           "Avg. Y2+ is steady-state after IO and can change again when a loan matures earlier than the other.")
+st.caption("🛈 Alleviator is shown separately and excluded from servicing; it still reduces interest from the month it’s paid. IO first year lowers Y1 servicing for bank loans with IO-12m.")
+
+# --- NEW: Year 1 Capital Required (Alleviator + Year-1 Servicing) ---
+st.markdown("### Year 1 Capital Required")
+cap = st.columns(4)
+cap[0].metric("Alleviator (Y1)", fmt_money(allev_in_y1))
+cap[1].metric("Bank Repayments (Y1)", fmt_money(bank_y1_incl))
+cap[2].metric("Seller Repayments (Y1, ex-Alleviator)", fmt_money(seller_y1_servicing))
+cap[3].metric("Total Capital (Y1)", fmt_money(year1_capital_required))
 
 # ========= Print & Exports =========
 def build_print_html(summary_dict):
@@ -333,16 +359,28 @@ def build_print_html(summary_dict):
             <th>EBITDA Used</th><td>{m(summary_dict['EBITDA Used for Servicing'])}</td></tr>
       </table>
 
-      <h3>Coverage</h3>
+      <h3>Coverage (Servicing Only)</h3>
       <table>
-        <tr><th>Year 1 Total</th><td>{m(summary_dict['Year 1 Repayments (Total)'])}</td>
-            <th>Avg. Y2+ Total</th><td>{m(summary_dict['Avg. Y2+ Repayments (Total)'])}</td></tr>
-        <tr><th>Debt as % EBITDA (Y1)</th><td>{p(summary_dict['Debt as % EBITDA (Y1)'])}</td>
-            <th>Debt as % EBITDA (Y2+)</th><td>{p(summary_dict['Debt as % EBITDA (Y2+)'])}</td></tr>
-        <tr><th>Profit Left (Y1 Annual)</th><td>{m(summary_dict['Profit Left (Y1 Annual)'])}</td>
-            <th>Profit Left (Y2+ Annual)</th><td>{m(summary_dict['Profit Left (Y2+ Annual)'])}</td></tr>
-        <tr><th>Profit Left (Y1 Monthly)</th><td>{m(summary_dict['Profit Left (Y1 Monthly)'])}</td>
-            <th>Profit Left (Y2+ Monthly)</th><td>{m(summary_dict['Profit Left (Y2+ Monthly)'])}</td></tr>
+        <tr><th>Year 1 Repayments</th><td>{m(summary_dict['Y1 Servicing'])}</td>
+            <th>Avg. Y2+ Repayments</th><td>{m(summary_dict['Y2+ Servicing'])}</td></tr>
+        <tr><th>Debt as % EBITDA (Y1)</th><td>{p(summary_dict['Debt % EBITDA (Y1)'])}</td>
+            <th>Debt as % EBITDA (Y2+)</th><td>{p(summary_dict['Debt % EBITDA (Y2+)'])}</td></tr>
+      </table>
+
+      <h3>Profit Left After Debt</h3>
+      <table>
+        <tr><th>Profit Left (Y1 Annual)</th><td>{m(summary_dict['Profit Left Y1 Annual'])}</td>
+            <th>Profit Left (Y1 Monthly)</th><td>{m(summary_dict['Profit Left Y1 Monthly'])}</td></tr>
+        <tr><th>Profit Left (Y2+ Annual)</th><td>{m(summary_dict['Profit Left Y2+ Annual'])}</td>
+            <th>Profit Left (Y2+ Monthly)</th><td>{m(summary_dict['Profit Left Y2+ Monthly'])}</td></tr>
+      </table>
+
+      <h3>Year 1 Capital Required</h3>
+      <table>
+        <tr><th>Alleviator (Y1)</th><td>{m(summary_dict['Alleviator Y1'])}</td>
+            <th>Bank Repayments (Y1)</th><td>{m(summary_dict['Bank Y1'])}</td></tr>
+        <tr><th>Seller Repayments (Y1, ex-Alleviator)</th><td>{m(summary_dict['Seller Y1 ex Allev'])}</td>
+            <th>Total Capital (Y1)</th><td>{m(summary_dict['Total Capital Y1'])}</td></tr>
       </table>
 
       <h3>Definitions</h3>
@@ -351,7 +389,7 @@ def build_print_html(summary_dict):
         <li><b>FFE</b>: Furniture, Fixtures & Equipment.</li>
         <li><b>P+I</b>: Principal & Interest.</li>
         <li><b>IO</b>: Interest-Only.</li>
-        <li><b>Alleviator</b>: One-off Seller principal payment.</li>
+        <li><b>Alleviator</b>: One-off Seller principal payment (shown separately from servicing).</li>
       </ul>
     </body></html>
     """
@@ -364,15 +402,18 @@ summary = {
     "Seller Principal (final)": seller_principal,
     "EBITDA (input)": ebitda_input,
     "EBITDA Used for Servicing": ebitda_adjusted,
-    "Year 1 Repayments (Total)": y1,
-    "Avg. Y2+ Repayments (Total)": y2plus,
-    "Debt as % EBITDA (Y1)": buffer_y1,
-    "Debt as % EBITDA (Y2+)": buffer_y2,
-    # Include the new profit-left metrics in print view:
-    "Profit Left (Y1 Annual)": profit_left_y1_annual,
-    "Profit Left (Y1 Monthly)": profit_left_y1_monthly,
-    "Profit Left (Y2+ Annual)": profit_left_y2_annual,
-    "Profit Left (Y2+ Monthly)": profit_left_y2_monthly,
+    "Y1 Servicing": y1_servicing,
+    "Y2+ Servicing": y2plus_incl,
+    "Debt % EBITDA (Y1)": buffer_y1,
+    "Debt % EBITDA (Y2+)": buffer_y2,
+    "Profit Left Y1 Annual": profit_left_y1_annual,
+    "Profit Left Y1 Monthly": profit_left_y1_monthly,
+    "Profit Left Y2+ Annual": profit_left_y2_annual,
+    "Profit Left Y2+ Monthly": profit_left_y2_monthly,
+    "Alleviator Y1": allev_in_y1,
+    "Bank Y1": bank_y1_incl,
+    "Seller Y1 ex Allev": seller_y1_servicing,
+    "Total Capital Y1": year1_capital_required,
 }
 
 # HTML print view (opens new tab)
@@ -386,15 +427,16 @@ if REPORTLAB_AVAILABLE:
     doc = SimpleDocTemplate(buf, pagesize=A4)
     styles = getSampleStyleSheet()
     doc.build([
-        Paragraph("Debt Servicing Summary", styles["Heading1"]),
-        Paragraph(f"Sale Price: {fmt_money(sale_price)}<br/>Financed: {fmt_money(financed)}", styles["Normal"]),
-        Paragraph(f"EBITDA: {fmt_money(ebitda_input)}<br/>EBITDA Used: {fmt_money(ebitda_adjusted)}", styles["Normal"]),
-        Paragraph(f"Year 1 Repayments: {fmt_money(y1)}<br/>Avg. Y2+ Repayments: {fmt_money(y2plus)}", styles["Normal"]),
+        Paragraph("Debt Servicing Summary (Servicing excl. Alleviator)", styles["Heading1"]),
+        Paragraph(f"Sale Price: {fmt_money(sale_price)} | Financed: {fmt_money(financed)}", styles["Normal"]),
+        Paragraph(f"EBITDA: {fmt_money(ebitda_input)} | EBITDA Used: {fmt_money(ebitda_adjusted)}", styles["Normal"]),
+        Paragraph(f"Y1 Repayments: {fmt_money(y1_servicing)} | Avg. Y2+ Repayments: {fmt_money(y2plus_incl)}", styles["Normal"]),
         Paragraph(f"Debt as % EBITDA: {buffer_y1*100:.1f}% (Y1) / {buffer_y2*100:.1f}% (Y2+)", styles["Normal"]),
-        Paragraph(f"Profit Left (Y1 Annual): {fmt_money(profit_left_y1_annual)}<br/>"
-                  f"Profit Left (Y1 Monthly): {fmt_money(profit_left_y1_monthly)}", styles["Normal"]),
-        Paragraph(f"Profit Left (Y2+ Annual): {fmt_money(profit_left_y2_annual)}<br/>"
-                  f"Profit Left (Y2+ Monthly): {fmt_money(profit_left_y2_monthly)}", styles["Normal"]),
+        Paragraph(f"Profit Left (Y1 Annual): {fmt_money(profit_left_y1_annual)} | Monthly: {fmt_money(profit_left_y1_monthly)}", styles["Normal"]),
+        Paragraph(f"Profit Left (Y2+ Annual): {fmt_money(profit_left_y2_annual)} | Monthly: {fmt_money(profit_left_y2_monthly)}", styles["Normal"]),
+        Paragraph(f"Year 1 Capital Required: Alleviator {fmt_money(allev_in_y1)} + "
+                  f"Bank Y1 {fmt_money(bank_y1_incl)} + Seller Y1 (ex Allev) {fmt_money(seller_y1_servicing)} "
+                  f"= {fmt_money(year1_capital_required)}", styles["Normal"]),
     ])
     buf.seek(0)
     st.download_button("📄 Download PDF", data=buf.getvalue(), file_name="debt_servicing.pdf", mime="application/pdf")
@@ -404,13 +446,13 @@ else:
 # ========= Risk Hints =========
 st.markdown("---")
 warn = []
-worst = max(y1, y2plus)
+worst_servicing = max(y1_servicing, y2plus_incl)
 if ebitda_adjusted == 0:
     warn.append("Adjusted EBITDA is zero; no coverage.")
-elif worst > ebitda_adjusted:
-    warn.append("Repayments exceed adjusted EBITDA in at least one phase (negative coverage).")
-elif worst > 0.7 * ebitda_adjusted:
-    warn.append("Debt service >~70% of adjusted EBITDA in at least one phase (thin buffer).")
+elif worst_servicing > ebitda_adjusted:
+    warn.append("Servicing exceeds adjusted EBITDA in at least one phase (negative coverage).")
+elif worst_servicing > 0.7 * ebitda_adjusted:
+    warn.append("Servicing >~70% of adjusted EBITDA in at least one phase (thin buffer).")
 if cap_bank and bank_raw > bank_capacity:
     warn.append("Bank principal capped by capacity; excess shifted to Seller Note.")
 if warn:
@@ -431,7 +473,7 @@ st.markdown(
   - *Amortizing (P+I)* — fixed payments across the term.
   - *Interest-Only (Full Term)* — interest only until maturity (balloon at end).
   - *IO 12m then Amortizing* — first 12 months IO, then fixed P+I.
-- **Seller Alleviator**: Optional one-off extra principal in the specified month (default Month 6).
+- **Seller Alleviator**: One-off seller principal payment (treated separately from servicing; reduces interest from the payment month).
 - **Bank Capacity**: Unsecured = EBITDA × multiple; Secured = FFE × advance rate. Toggle capping to limit bank loan and push overflow to Seller Note.
 - **Operator Salary**: Optional deduction from EBITDA before coverage calculations.
     """
@@ -439,10 +481,10 @@ st.markdown(
 st.markdown("### Outputs")
 st.markdown(
     """
-- **Key Servicing Numbers (Blended)**: Year-1 vs Avg. Years 2+ totals and monthly equivalents, plus **Debt as % of EBITDA**.
-- **Profit Left After Debt**: EBITDA minus repayments shown **per year** and **per month** (Y1 and Y2+).
-- **Monthly by Loan**: Bank and Seller monthly figures shown **separately** (Year-1 and Avg. Y2+), plus totals.
-- **Loan Snapshots**: Principals, structures, rates, terms.
+- **Coverage (Servicing Only)**: Year-1 vs Avg. Y2+ repayments excluding Alleviator, plus **Debt as % of EBITDA**.
+- **Profit Left After Debt**: EBITDA − servicing (annual & monthly for Y1 and Y2+).
+- **Monthly by Loan**: Bank and Seller monthly repayments shown separately (servicing-only).
+- **Year 1 Capital Required**: **Alleviator (Y1) + Bank Y1 + Seller Y1 (ex-Alleviator)**.
 - **Print / Export**: HTML Print View and (optionally) PDF download.
 - **Risk Hints**: Flags thin/negative coverage or bank capacity capping.
     """
@@ -455,7 +497,7 @@ st.markdown(
 - **FFE** — Furniture, Fixtures & Equipment (collateral).  
 - **P+I** — Principal & Interest (amortizing).  
 - **IO** — Interest-Only (principal due later or at maturity).  
-- **Alleviator** — Seller “Tax Burden Alleviator”: a one-off extra principal payment (you choose the month).  
+- **Alleviator** — Seller “Tax Burden Alleviator”: a one-off principal payment (separate from servicing).  
 - **Y1 / Y2+** — Year-1 and average of Years 2 and beyond.  
     """
 )
