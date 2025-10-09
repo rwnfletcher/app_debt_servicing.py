@@ -4,15 +4,6 @@ from io import BytesIO
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
-from datetime import datetime
-
-# PDF tools (pure Python)
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-from reportlab.lib.units import mm
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
 st.set_page_config(
     page_title="Debt Servicing Calculator — Bank + Seller Note (Capacity-aware)",
@@ -54,7 +45,7 @@ def reset_defaults():
     st.session_state["op_salary"] = _money_fmt_str(DEFAULTS["op_salary"])
     st.session_state["allev_amt"] = _money_fmt_str(DEFAULTS["allev_amt"])
     st.session_state["ffe_val"] = _money_fmt_str(DEFAULTS["ffe_val"])
-    # Percent inputs (text boxes)
+    # Percent inputs (text boxes expecting % or decimal)
     st.session_state["equity_roll_pct"] = f"{DEFAULTS['equity_roll_pct']*100:.1f}%"
     st.session_state["deposit_pct"] = f"{DEFAULTS['deposit_pct']*100:.1f}%"
     st.session_state["ffe_adv_rate"] = f"{DEFAULTS['ffe_adv_rate']*100:.1f}%"
@@ -106,13 +97,6 @@ def fmt_money(x: float) -> str:
         return f"${float(x or 0):,.0f}"
     except:
         return "$0"
-
-def fmt_money2(x: float) -> str:
-    "2 decimal places for tables"
-    try:
-        return f"${float(x or 0):,.2f}"
-    except:
-        return "$0.00"
 
 def fmt_pct(x: float) -> str:
     try:
@@ -252,7 +236,7 @@ def build_amortization_schedule(
         Interest=("Interest","sum"),
         Principal=("Principal","sum")
     )
-    yearly["Ending Balance"] = df.groupby(["Year"])["Ending Balance"].last().values
+    yearly["Ending Balance"] = df.groupby("Year"])["Ending Balance"].last().values
     return df, yearly
 
 def pad_and_sum_monthly(df_a: pd.DataFrame, df_b: pd.DataFrame) -> pd.DataFrame:
@@ -447,7 +431,7 @@ def year1_and_avg_later(df_monthly: pd.DataFrame):
 
 repay_year1_total, repay_avg_later_total = year1_and_avg_later(combined_m_df)
 
-# ---- Per-loan Year 1 and Avg Years 2+ ----
+# ---- Per-loan Year 1 and Avg Years 2+ (for monthly display by loan) ----
 def per_loan_year1_and_avg_later(df_monthly: pd.DataFrame):
     if df_monthly.empty:
         return 0.0, 0.0
@@ -633,7 +617,7 @@ else:
     img_buf.seek(0)
     st.download_button("⬇️ Download Chart (PNG)", data=img_buf, file_name=f"principal_vs_interest_{view.lower()}.png", mime="image/png")
 
-# ========= Export: Excel =========
+# ========= Export =========
 st.markdown("### Export")
 summary = {
     "Sale Price": sale_price,
@@ -697,153 +681,6 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
-# ========= Export: PDF (Dashboard Summary) =========
-def build_dashboard_pdf(summary_dict: dict) -> bytes:
-    """
-    Build a compact A4 PDF with key KPIs, per-loan monthly costs, loan snapshots,
-    and SOP + Definitions. Returns bytes.
-    """
-    buf = BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=16*mm, rightMargin=16*mm, topMargin=16*mm, bottomMargin=16*mm)
-    styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="h1", parent=styles["Heading1"], fontSize=16, spaceAfter=8))
-    styles.add(ParagraphStyle(name="h2", parent=styles["Heading2"], fontSize=12, spaceAfter=6))
-    styles.add(ParagraphStyle(name="small", parent=styles["Normal"], fontSize=9, leading=12))
-    styles.add(ParagraphStyle(name="body", parent=styles["Normal"], fontSize=10, leading=14))
-
-    elements = []
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    elements.append(Paragraph("Debt Servicing Calculator — Dashboard Summary", styles["h1"]))
-    elements.append(Paragraph(f"Generated: {now}", styles["small"]))
-    elements.append(Spacer(1, 6))
-
-    # Top metrics table
-    meta_rows = [
-        ["Sale Price", fmt_money(summary_dict["Sale Price"]), "Financed Amount", fmt_money(summary_dict["Financed Amount"])],
-        ["Equity Roll", f"{fmt_money(summary_dict['Equity Roll Value'])} ({fmt_pct(summary_dict['Equity Roll %'])})",
-         "Deposit", f"{fmt_money(summary_dict['Deposit Value'])} ({fmt_pct(summary_dict['Deposit %'])})"],
-        ["Bank Principal (final)", fmt_money(summary_dict["Bank Principal (final)"]),
-         "Seller Principal (final)", fmt_money(summary_dict["Seller Principal (final)"])],
-        ["EBITDA (input)", fmt_money(summary_dict["EBITDA (input)"]),
-         "EBITDA Used for Servicing", fmt_money(summary_dict["EBITDA Used for Servicing"])],
-    ]
-    t = Table(meta_rows, colWidths=[45*mm, 45*mm, 45*mm, 45*mm])
-    t.setStyle(TableStyle([
-        ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
-        ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
-        ("FONTSIZE", (0,0), (-1,-1), 9),
-        ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
-        ("ALIGN", (1,0), (-1,-1), "RIGHT"),
-    ]))
-    elements.append(t)
-    elements.append(Spacer(1, 6))
-
-    # Coverage table (Y1 vs Y2+)
-    cov_rows = [
-        ["Year 1 Repayments (Total)", fmt_money(summary_dict["Year 1 Repayments (Total)"]),
-         "Monthly (Y1)", fmt_money(summary_dict["Year 1 Repayments (Total)"]/12 if summary_dict["Year 1 Repayments (Total)"] else 0.0)],
-        ["Avg. Y2+ Repayments (Total)", fmt_money(summary_dict["Avg. Y2+ Repayments (Total)"]),
-         "Monthly (Y2+ avg.)", fmt_money(summary_dict["Avg. Y2+ Repayments (Total)"]/12 if summary_dict["Avg. Y2+ Repayments (Total)"] else 0.0)],
-        ["Debt as % EBITDA (Y1)", fmt_pct(summary_dict["Debt as % EBITDA (Y1)"]),
-         "Debt as % EBITDA (Y2+)", fmt_pct(summary_dict["Debt as % EBITDA (Y2+)"])],
-    ]
-    t2 = Table(cov_rows, colWidths=[60*mm, 30*mm, 60*mm, 30*mm])
-    t2.setStyle(TableStyle([
-        ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
-        ("FONTSIZE", (0,0), (-1,-1), 9),
-        ("ALIGN", (1,0), (-1,-1), "RIGHT"),
-        ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
-    ]))
-    elements.append(Paragraph("Coverage Summary", styles["h2"]))
-    elements.append(t2)
-    elements.append(Spacer(1, 6))
-
-    # Per-loan monthly
-    elements.append(Paragraph("Monthly Repayments by Loan", styles["h2"]))
-    perloan_rows = [
-        ["", "Bank", "Seller", "Total"],
-        ["Year 1 (Monthly)",
-         fmt_money2(summary_dict["Year 1 Repayments (Bank)"]/12 if summary_dict["Year 1 Repayments (Bank)"] else 0.0),
-         fmt_money2(summary_dict["Year 1 Repayments (Seller)"]/12 if summary_dict["Year 1 Repayments (Seller)"] else 0.0),
-         fmt_money2(summary_dict["Year 1 Repayments (Total)"]/12 if summary_dict["Year 1 Repayments (Total)"] else 0.0)],
-        ["Avg. Y2+ (Monthly)",
-         fmt_money2(summary_dict["Avg. Y2+ Repayments (Bank)"]/12 if summary_dict["Avg. Y2+ Repayments (Bank)"] else 0.0),
-         fmt_money2(summary_dict["Avg. Y2+ Repayments (Seller)"]/12 if summary_dict["Avg. Y2+ Repayments (Seller)"] else 0.0),
-         fmt_money2(summary_dict["Avg. Y2+ Repayments (Total)"]/12 if summary_dict["Avg. Y2+ Repayments (Total)"] else 0.0)],
-    ]
-    t3 = Table(perloan_rows, colWidths=[40*mm, 40*mm, 40*mm, 40*mm])
-    t3.setStyle(TableStyle([
-        ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
-        ("FONTSIZE", (0,0), (-1,-1), 9),
-        ("ALIGN", (1,1), (-1,-1), "RIGHT"),
-        ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
-    ]))
-    elements.append(t3)
-    elements.append(Spacer(1, 6))
-
-    # Loan snapshots brief
-    elements.append(Paragraph("Loan Snapshots", styles["h2"]))
-    snap_txt = (
-        f"<b>Bank</b>: {summary_dict['Bank Structure']}, {summary_dict['Bank Rate %']:.2f}% p.a., "
-        f"{summary_dict['Bank Term (yrs)']} yrs, Principal {fmt_money(summary_dict['Bank Principal (final)'])}<br/>"
-        f"<b>Seller</b>: {summary_dict['Seller Structure']}, {summary_dict['Seller Rate %']:.2f}% p.a., "
-        f"{summary_dict['Seller Term (yrs)']} yrs, Principal {fmt_money(summary_dict['Seller Principal (final)'])}"
-    )
-    elements.append(Paragraph(snap_txt, styles["body"]))
-    if summary_dict.get("Seller Alleviator Amount", 0) and summary_dict.get("Seller Alleviator Month"):
-        elements.append(Paragraph(
-            f"Seller Alleviator: {fmt_money(summary_dict['Seller Alleviator Amount'])} in Month {summary_dict['Seller Alleviator Month']}",
-            styles["small"])
-        )
-    elements.append(Spacer(1, 6))
-
-    # SOP (Inputs/Outputs) — condensed
-    elements.append(Paragraph("How to Use — SOP", styles["h2"]))
-    sop_inputs = (
-        "- Sale Price / EBITDA / FFE value: whole dollars (commas ok).<br/>"
-        "- Equity Roll / Deposit / FFE advance: enter as % (e.g., 10% or 0.10).<br/>"
-        "- Debt Stack Split: % of financed amount as Seller Note (bank = balance).<br/>"
-        "- Bank Structure: Amortizing / IO Full Term / IO 12m then Amortizing.<br/>"
-        "- Seller Alleviator: one-off extra principal in a chosen month.<br/>"
-        "- Bank Capacity: Unsecured (EBITDA×multiple) + Secured (FFE×advance). Cap bank loan if desired.<br/>"
-        "- Operator Salary: optional deduction from EBITDA before coverage."
-    )
-    elements.append(Paragraph(sop_inputs, styles["small"]))
-    elements.append(Spacer(1, 4))
-    sop_outputs = (
-        "- Key Servicing Numbers: Y1 vs Avg. Y2+ (and monthly), Debt as % of EBITDA.<br/>"
-        "- Monthly by Loan: Bank & Seller shown separately and totalled.<br/>"
-        "- Loan Snapshots: principals, terms, structures, rates.<br/>"
-        "- Amortization Views & Excel export; Risk Hints for coverage & capacity."
-    )
-    elements.append(Paragraph(sop_outputs, styles["small"]))
-    elements.append(Spacer(1, 6))
-
-    # Definitions
-    elements.append(Paragraph("Definitions", styles["h2"]))
-    defs = (
-        "- EBITDA — Earnings Before Interest, Taxes, Depreciation & Amortization.<br/>"
-        "- FFE — Furniture, Fixtures & Equipment (collateral).<br/>"
-        "- P+I — Principal & Interest (amortizing).<br/>"
-        "- IO — Interest-Only (principal later or at maturity).<br/>"
-        "- Alleviator — one-off extra principal (seller).<br/>"
-        "- Y1 / Y2+ — Year-1 and average of Years 2 and beyond."
-    )
-    elements.append(Paragraph(defs, styles["small"]))
-
-    doc.build(elements)
-    buf.seek(0)
-    return buf.getvalue()
-
-pdf_bytes = build_dashboard_pdf(summary)
-
-st.download_button(
-    "🖨️ Download PDF (Dashboard Summary)",
-    data=pdf_bytes,
-    file_name="debt_servicing_dashboard.pdf",
-    mime="application/pdf",
-)
-
 # ========= Risk Hints =========
 st.markdown("---")
 warn = []
@@ -861,7 +698,7 @@ if warn:
 else:
     st.info("Coverage looks reasonable based on inputs. Layer in working capital, capex, taxes, and contingencies.")
 
-# ========= How to Use — SOP (full on page) =========
+# ========= How to Use — SOP =========
 st.markdown("---")
 st.markdown("## How to Use — SOP")
 st.markdown("### Inputs")
