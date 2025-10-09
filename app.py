@@ -11,7 +11,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# ========= Formatting helpers (exact $ with commas, % helper) =========
+# ========= Display helpers =========
 def fmt_money(x: float) -> str:
     try:
         return f"${float(x or 0):,.0f}"
@@ -24,7 +24,7 @@ def fmt_pct(x: float) -> str:
     except:
         return "—"
 
-# ========= Input helpers (text inputs that accept commas) =========
+# ========= Input helpers (money with commas; percent text) =========
 def _parse_money_str(s: str, default: float = 0.0) -> float:
     if s is None:
         return float(default)
@@ -37,12 +37,34 @@ def _parse_money_str(s: str, default: float = 0.0) -> float:
         return float(default)
 
 def money_input(label: str, default: float, key: str, help: str | None = None) -> float:
-    """
-    A text box that accepts commas. Shows default with commas.
-    Returns float value (no rounding applied).
-    """
+    """Text input that accepts commas. Returns float."""
     val_str = st.text_input(label, value=f"{default:,.2f}", key=key, help=help)
     return _parse_money_str(val_str, default)
+
+def _parse_percent_str(s: str, default: float = 0.0) -> float:
+    """
+    Accepts '10%', '10', or '0.10' and returns a fraction: 0.10
+    """
+    if s is None:
+        return float(default)
+    s = s.strip().replace(",", "")
+    if s.endswith("%"):
+        s = s[:-1].strip()
+        try:
+            return float(s) / 100.0
+        except:
+            return float(default)
+    try:
+        v = float(s)
+        return v / 100.0 if v > 1 else v
+    except:
+        return float(default)
+
+def percent_input(label: str, default_fraction: float, key: str, help: str | None = None) -> float:
+    """Text input that accepts '%', returns fraction (e.g., 0.10)."""
+    default_str = f"{default_fraction*100:.1f}%"
+    s = st.text_input(label, value=default_str, key=key, help=help)
+    return _parse_percent_str(s, default_fraction)
 
 # ========= Finance helpers =========
 def pmt(rate_per_period: float, n_periods: int, present_value: float) -> float:
@@ -69,7 +91,7 @@ def build_amortization_schedule(
     structure:
       - "Amortizing (P+I)"
       - "Interest-Only (Full Term)"
-      - "IO 12m then Amortizing" -> use io_months=12 (or custom)
+      - "IO 12m then Amortizing" (use io_months=12)
     extra_principal_map: {month_index: extra_principal_amount}
     """
     cols = ["Loan","Period","Payment","Interest","Principal","Ending Balance","Year","Month","Quarter","Cum Interest","Cum Principal"]
@@ -134,7 +156,7 @@ def build_amortization_schedule(
         Interest=("Interest","sum"),
         Principal=("Principal","sum")
     )
-    yearly["Ending Balance"] = df.groupby("Year")["Ending Balance"].last().values
+    yearly["Ending Balance"] = df.groupby(["Year"])["Ending Balance"].last().values
     return df, yearly
 
 def pad_and_sum_monthly(df_a: pd.DataFrame, df_b: pd.DataFrame) -> pd.DataFrame:
@@ -223,7 +245,6 @@ def make_chart(df: pd.DataFrame, label_col: str, interest_col: str, principal_co
 with st.sidebar:
     st.header("Deal Inputs")
 
-    # Money-style inputs with commas
     sale_price = money_input("Sale Price", 5_000_000.0, key="sale_price")
     ebitda_input = money_input("EBITDA (annual, before any operator salary)", 1_500_000.0, key="ebitda")
 
@@ -234,8 +255,8 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("Equity / Deposit")
-    equity_roll_pct = st.slider("Equity Roll (% of Sale Price)", 0.0, 90.0, 0.0, 1.0) / 100.0
-    deposit_pct = st.slider("Deposit / Down Payment (% of Sale Price)", 0.0, 90.0, 0.0, 1.0) / 100.0
+    equity_roll_pct = percent_input("Equity Roll", 0.00, key="equity_roll_pct")
+    deposit_pct = percent_input("Deposit / Down Payment", 0.00, key="deposit_pct")
 
     st.markdown("---")
     st.subheader("Debt Stack Split")
@@ -267,7 +288,7 @@ with st.sidebar:
     st.subheader("Bank Capacity (Guide)")
     unsecured_multiple = st.number_input("Unsecured finance vs EBITDA (× multiple)", min_value=0.0, value=2.2, step=0.1, format="%.2f")
     ffe_value = money_input("FFE / Equipment Value (A$)", 0.0, key="ffe_val")
-    ffe_advance_rate = st.number_input("Advance rate on FFE (0–1)", min_value=0.0, max_value=1.0, value=0.70, step=0.05, format="%.2f")
+    ffe_advance_rate = percent_input("Advance rate on FFE", 0.70, key="ffe_adv_rate")
     cap_bank_to_capacity = st.checkbox("Cap bank loan to capacity & reallocate excess to Seller Note", value=True)
 
 # ========= Core Calculations =========
@@ -311,7 +332,7 @@ seller_m_df, seller_y_df = build_amortization_schedule(
 # Combined monthly schedule
 combined_m_df = pad_and_sum_monthly(bank_m_df, seller_m_df)
 
-# Year 1 vs Avg. Year 2+ repayments
+# ---- Annual payments for Year 1 and Avg Years 2+ (combined) ----
 def year1_and_avg_later(df_monthly: pd.DataFrame):
     if df_monthly.empty: return 0.0, 0.0
     annual = to_annual(df_monthly)
@@ -320,22 +341,35 @@ def year1_and_avg_later(df_monthly: pd.DataFrame):
     avg_later = float(later.mean()) if not later.empty else 0.0
     return y1, avg_later
 
-repay_year1, repay_avg_later = year1_and_avg_later(combined_m_df)
+repay_year1_total, repay_avg_later_total = year1_and_avg_later(combined_m_df)
+
+# ---- Per-loan Year 1 and Avg Years 2+ (for monthly display by loan) ----
+def per_loan_year1_and_avg_later(df_monthly: pd.DataFrame):
+    if df_monthly.empty:
+        return 0.0, 0.0
+    annual = to_annual(df_monthly)
+    y1 = float(annual.loc[annual["Year"]==1, "Payments"].sum()) if (annual["Year"]==1).any() else 0.0
+    later = annual.loc[annual["Year"]>=2, "Payments"]
+    avg_later = float(later.mean()) if not later.empty else 0.0
+    return y1, avg_later
+
+bank_y1, bank_later = per_loan_year1_and_avg_later(bank_m_df)
+seller_y1, seller_later = per_loan_year1_and_avg_later(seller_m_df)
 
 # EBITDA adjust
 ebitda_adjusted = max(ebitda_input - (operator_salary if use_operator_salary else 0.0), 0.0)
 
-# Profit after debt service — both phases
-profit_after_debt_yr1 = ebitda_adjusted - repay_year1
-profit_after_debt_later = ebitda_adjusted - repay_avg_later
+# Profit after debt service — both phases (combined)
+profit_after_debt_yr1 = ebitda_adjusted - repay_year1_total
+profit_after_debt_later = ebitda_adjusted - repay_avg_later_total
 
-# Buffers
-buffer_ratio_yr1 = (repay_year1 / ebitda_adjusted) if ebitda_adjusted > 0 else float("inf")
-buffer_ratio_later = (repay_avg_later / ebitda_adjusted) if ebitda_adjusted > 0 else float("inf")
+# Buffers (combined)
+buffer_ratio_yr1 = (repay_year1_total / ebitda_adjusted) if ebitda_adjusted > 0 else float("inf")
+buffer_ratio_later = (repay_avg_later_total / ebitda_adjusted) if ebitda_adjusted > 0 else float("inf")
 
 # ========= Header / KPIs =========
 st.title("📈 Debt Servicing Calculator — Bank + Seller Note (Capacity-aware)")
-st.caption("Type commas in dollar inputs on the left. App calculates blended coverage, IO-first year, seller alleviator, and bank capacity capping.")
+st.caption("Comma-friendly money inputs on the left. Percent fields accept '10%' or '0.10'. Shows IO-first year, seller alleviator, bank capacity capping, and per-loan monthly costs.")
 
 top_cols = st.columns([1,1,1,1,1,1])
 with top_cols[0]:
@@ -366,13 +400,14 @@ with cap4:
 
 st.markdown("---")
 
+# ========= Blended coverage KPIs =========
 center_cols = st.columns([1,2,1])
 with center_cols[1]:
     st.markdown(
         """
         <div style="text-align:center;">
             <h2 style="margin-bottom:0.5rem;">Key Servicing Numbers (Blended)</h2>
-            <p style="color:#6b7280;margin-top:0;">Year-1 vs later years if an IO year is used</p>
+            <p style="color:#6b7280;margin-top:0;">Year-1 vs Avg. Years 2+ (IO year lowers Y1 if selected)</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -381,17 +416,41 @@ with center_cols[1]:
     with kpi:
         k1, k2, k3 = st.columns(3)
         with k1:
-            st.metric("Year 1 Repayments", fmt_money(repay_year1))
-            st.metric("Monthly (Year 1)", fmt_money(repay_year1/12 if repay_year1 else 0.0))
+            st.metric("Year 1 Repayments", fmt_money(repay_year1_total))
+            st.metric("Monthly (Year 1)", fmt_money(repay_year1_total/12 if repay_year1_total else 0.0))
         with k2:
-            st.metric("Avg. Year 2+ Repayments", fmt_money(repay_avg_later))
-            st.metric("Monthly (Y2+ avg.)", fmt_money(repay_avg_later/12 if repay_avg_later else 0.0))
+            st.metric("Avg. Year 2+ Repayments", fmt_money(repay_avg_later_total))
+            st.metric("Monthly (Y2+ avg.)", fmt_money(repay_avg_later_total/12 if repay_avg_later_total else 0.0))
         with k3:
             b1 = "∞" if buffer_ratio_yr1 == float("inf") else fmt_pct(buffer_ratio_yr1)
             b2 = "∞" if buffer_ratio_later == float("inf") else fmt_pct(buffer_ratio_later)
             st.metric("Debt as % EBITDA (Y1)", b1)
             st.metric("Debt as % EBITDA (Y2+)", b2)
             st.caption("Lower is safer. Consider WC, capex, tax, contingencies.")
+
+# ========= NEW: Monthly costs by loan (separate + total) =========
+st.markdown("### Monthly Repayments by Loan")
+byloan1, byloan2 = st.columns(2)
+
+with byloan1:
+    card = st.container(border=True)
+    with card:
+        st.subheader("Year 1 — Monthly")
+        if bank_y1 > 0:
+            st.metric("Bank (Y1 Monthly)", fmt_money(bank_y1 / 12))
+        if seller_y1 > 0:
+            st.metric("Seller (Y1 Monthly)", fmt_money(seller_y1 / 12))
+        st.metric("Total (Y1 Monthly)", fmt_money(repay_year1_total / 12 if repay_year1_total else 0.0))
+
+with byloan2:
+    card = st.container(border=True)
+    with card:
+        st.subheader("Avg. Years 2+ — Monthly")
+        if bank_later > 0:
+            st.metric("Bank (Y2+ Monthly)", fmt_money(bank_later / 12))
+        if seller_later > 0:
+            st.metric("Seller (Y2+ Monthly)", fmt_money(seller_later / 12))
+        st.metric("Total (Y2+ Monthly)", fmt_money(repay_avg_later_total / 12 if repay_avg_later_total else 0.0))
 
 # ========= Loan Snapshots =========
 st.markdown("### Loan Snapshots")
@@ -486,14 +545,18 @@ summary = {
     "Operator Salary Deducted?": use_operator_salary,
     "Operator Salary (annual)": operator_salary if use_operator_salary else 0.0,
     "EBITDA Used for Servicing": ebitda_adjusted,
-    "Year 1 Repayments (blended)": repay_year1,
-    "Avg. Year 2+ Repayments (blended)": repay_avg_later,
+    "Year 1 Repayments (Bank)": bank_y1,
+    "Year 1 Repayments (Seller)": seller_y1,
+    "Year 1 Repayments (Total)": repay_year1_total,
+    "Avg. Y2+ Repayments (Bank)": bank_later,
+    "Avg. Y2+ Repayments (Seller)": seller_later,
+    "Avg. Y2+ Repayments (Total)": repay_avg_later_total,
     "Debt as % EBITDA (Y1)": buffer_ratio_yr1 if ebitda_adjusted > 0 else None,
     "Debt as % EBITDA (Y2+)": buffer_ratio_later if ebitda_adjusted > 0 else None,
 }
 summary_df = pd.DataFrame([summary])
 
-# Alternate views (precise, for Excel)
+# Precise export views
 quarterly_df = to_quarterly(combined_m_df) if not combined_m_df.empty else pd.DataFrame()
 annual_df = to_annual(combined_m_df) if not combined_m_df.empty else pd.DataFrame()
 
@@ -526,7 +589,7 @@ st.download_button(
 # ========= Risk Hints =========
 st.markdown("---")
 warn = []
-worst_repay = max(repay_year1, repay_avg_later)
+worst_repay = max(repay_year1_total, repay_avg_later_total)
 if ebitda_adjusted == 0:
     warn.append("Adjusted EBITDA is zero; debt service is not covered.")
 elif worst_repay > ebitda_adjusted:
